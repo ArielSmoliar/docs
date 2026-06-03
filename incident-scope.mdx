@@ -1,0 +1,152 @@
+---
+title: "Incident Scope"
+description: "On-demand audit log analysis for security incidents"
+---
+
+## Incident Scope
+
+When a security incident hits, Incident Scope pulls your cloud audit logs for a specific time window, runs AI analysis focused on cross-service correlation and lateral movement, and creates a GitHub Issue with a timeline narrative and containment suggestions.
+
+Incident Scope requires a connected cloud environment (GCP connector) and a Flare API key. It completes the Marketplace triptych alongside [PR Security Check](/pr-security-check) (pre-merge) and [Deploy Webhooks](/deploy-webhooks) (post-deploy).
+
+<Info>
+**Documentation Index** — Fetch the complete documentation index at: [https://docs.tryflare.ai/llms.txt](https://docs.tryflare.ai/llms.txt). Use this file to discover all available pages before exploring further.
+</Info>
+
+## How it works
+
+1. An engineer triggers a `workflow_dispatch` in GitHub Actions with a time window
+2. The Action calls the Flare API with the time range and API key
+3. Flare fetches audit logs from the connected GCP project for that window
+4. Claude analyzes the logs with an incident-focused prompt
+5. The Action creates a GitHub Issue with a timeline table, narrative, and severity counts
+
+Analysis typically completes in under 90 seconds for windows under 4 hours.
+
+## What Flare looks for
+
+The incident analysis prompt focuses on:
+
+- **Timeline reconstruction** — cross-service event ordering
+- **Actor tracking** — following each identity (user, service account, IP) across the window
+- **Lateral movement** — when one action enables access in a different service (e.g., IAM grant followed by storage access)
+- **Privilege escalation** — self-grants, role binding changes, service account key creation
+- **Data access patterns** — who accessed what data stores and when
+- **Permission failure clusters** — PERMISSION_DENIED spikes that suggest reconnaissance
+
+## Setting up
+
+### 1. Generate an API key
+
+Go to **Settings > API Keys** at [tryflare.ai/settings](https://tryflare.ai/settings) and create a key. The key starts with `flr_pr_`.
+
+### 2. Add the key as a repository secret
+
+In your GitHub repo: **Settings > Secrets and variables > Actions > New repository secret**
+
+- Name: `FLARE_API_KEY`
+- Value: your API key
+
+### 3. Add the workflow
+
+Create `.github/workflows/incident-scope.yml`:
+
+```yaml
+name: Incident Scope
+on:
+  workflow_dispatch:
+    inputs:
+      time_from:
+        description: 'Start of incident window (ISO 8601)'
+        required: true
+      time_to:
+        description: 'End of incident window (ISO 8601, default: now)'
+        required: false
+        default: ''
+
+jobs:
+  scope:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: tryflare-ai/incident-scope@v1
+        with:
+          token: ${{ secrets.FLARE_API_KEY }}
+          time-from: ${{ inputs.time_from }}
+          time-to: ${{ inputs.time_to }}
+```
+
+## Inputs
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `token` | Yes | — | Flare API key (`flr_pr_...`) |
+| `time-from` | Yes | — | Start of incident window (ISO 8601) |
+| `time-to` | No | now | End of incident window (ISO 8601) |
+| `connector-id` | No | most recent | Specific connector ID. Defaults to most recently created active connector. |
+| `severity-filter` | No | `all` | Minimum severity floor: `all`, `medium`, `high`, `critical` |
+| `api-url` | No | `https://www.tryflare.ai/api/webhooks/incident-scope` | Override for self-hosted |
+
+## Outputs
+
+| Output | Description |
+|--------|-------------|
+| `issue-url` | URL of the created GitHub Issue |
+| `total-events` | Total audit log events analyzed |
+| `truncated` | Whether logs were capped due to volume |
+
+## GitHub Issue output
+
+The Action creates a GitHub Issue containing:
+
+- **Header** with time window, event count, and truncation status
+- **Narrative** — Claude's plain-English summary of what happened
+- **Timeline table** — chronological events with service, actor, action, and severity
+- Powered by Flare footer
+
+## Connector resolution
+
+If you omit `connector-id`, Flare uses your most recently created active connector. If you specify one, Flare verifies you own it before proceeding.
+
+If the connector's GCP token has expired, you'll get a 401 error with a message to re-authorize at tryflare.ai/connectors.
+
+## Limits
+
+| Limit | Value |
+|-------|-------|
+| Max time window | 24 hours |
+| Max events | 5,000 (severity-prioritized truncation) |
+| Daily limit | 10 analyses/day (shared across all Flare features) |
+| Latency target | Under 90 seconds for windows under 4 hours |
+| Action timeout | 120 seconds |
+
+## Time format
+
+All times must be ISO 8601 format (e.g., `2026-01-15T02:00:00Z`). Relative times ("2 hours ago") are not supported in V1.
+
+If `time-to` is omitted or empty, it defaults to the current UTC time.
+
+## Log truncation
+
+If the time window contains more than 5,000 audit log events, Flare prioritizes by severity:
+
+1. Critical/Error events kept first
+2. Warning events next
+3. Info/Debug events fill remaining capacity
+
+The response includes `truncated: true` and the number of events dropped.
+
+## Combining with other Actions
+
+Incident Scope works alongside the other Flare Actions:
+
+- **[PR Security Check](/pr-security-check)** catches misconfigurations before merge
+- **[Deploy Webhooks](/deploy-webhooks)** compares before/after each deployment
+- **Incident Scope** reconstructs what happened during a security event
+
+All three share the same daily analysis limit and API key infrastructure.
+
+## Revoking a key
+
+Delete the key from **Settings > API Keys** at tryflare.ai. The Action will return 401 on the next run.
